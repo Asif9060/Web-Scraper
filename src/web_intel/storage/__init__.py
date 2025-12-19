@@ -11,6 +11,7 @@ Provides SQLite-based storage with:
 from web_intel.storage.database import (
     Database,
     get_database,
+    reset_database,
 )
 from web_intel.storage.schema import (
     SchemaManager,
@@ -34,6 +35,7 @@ __all__ = [
     # Database
     "Database",
     "get_database",
+    "reset_database",
     # Schema
     "SchemaManager",
     "SCHEMA_VERSION",

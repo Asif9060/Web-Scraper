@@ -135,6 +135,18 @@ class StorageSettings(BaseModel):
         le=1536,
         description="Dimension of embedding vectors (must match embedding model)",
     )
+    max_vectors_in_memory: int = Field(
+        default=50000,
+        ge=1000,
+        le=500000,
+        description="Maximum vectors to keep in memory. Older vectors are evicted.",
+    )
+    vector_eviction_batch_size: int = Field(
+        default=5000,
+        ge=100,
+        le=50000,
+        description="Number of vectors to evict when memory limit is reached.",
+    )
     wal_mode: bool = Field(
         default=True,
         description="Enable WAL mode for better concurrent access",
@@ -306,6 +318,49 @@ class EmbeddingSettings(BaseModel):
         return Path(v) if isinstance(v, str) else v
 
 
+class NavigationSettings(BaseModel):
+    """Navigation agent configuration with tiered decision system."""
+
+    use_llm_for_navigation: bool = Field(
+        default=False,
+        description="Whether to use LLM for navigation decisions. Disabled by default due to CPU cost.",
+    )
+    use_embeddings_for_ranking: bool = Field(
+        default=True,
+        description="Whether to use embedding similarity as Tier-2 ranking (fast).",
+    )
+    llm_confidence_threshold: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Only use LLM if heuristic confidence is below this threshold.",
+    )
+    keyword_weight: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="Weight for keyword overlap in heuristic scoring.",
+    )
+    url_weight: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Weight for URL pattern heuristics.",
+    )
+    embedding_weight: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Weight for embedding similarity in scoring.",
+    )
+    max_links_to_evaluate: int = Field(
+        default=20,
+        ge=5,
+        le=100,
+        description="Maximum links to evaluate per page.",
+    )
+
+
 class LoggingSettings(BaseModel):
     """Logging configuration."""
 
@@ -382,6 +437,10 @@ class Settings(BaseModel):
     embedding: EmbeddingSettings = Field(
         default_factory=EmbeddingSettings,
         description="Embedding model settings",
+    )
+    navigation: NavigationSettings = Field(
+        default_factory=NavigationSettings,
+        description="Navigation agent settings",
     )
     logging: LoggingSettings = Field(
         default_factory=LoggingSettings,

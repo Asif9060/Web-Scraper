@@ -27,6 +27,7 @@ from web_intel.crawler.queue import URLQueue, URLPriority, normalize_url
 from web_intel.crawler.filters import CombinedFilter
 from web_intel.crawler.rate_limiter import AdaptiveRateLimiter
 from web_intel.utils.logging import get_logger
+from web_intel.utils.metrics import Metrics
 
 logger = get_logger(__name__)
 
@@ -274,6 +275,7 @@ class Crawler:
                 content = await self._process_url(page_ctx, queued)
                 if content:
                     self._progress.pages_crawled += 1
+                    Metrics.get().increment("pages_crawled")
                     yield content
                 else:
                     self._progress.pages_skipped += 1

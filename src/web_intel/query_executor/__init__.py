@@ -13,6 +13,7 @@ from web_intel.query_executor.executor import (
     QueryResult,
     RetrievalResult,
     AnswerSource,
+    AnswerStrategy,
 )
 from web_intel.query_executor.ranker import (
     ResultRanker,
@@ -25,6 +26,7 @@ __all__ = [
     "QueryResult",
     "RetrievalResult",
     "AnswerSource",
+    "AnswerStrategy",
     "ResultRanker",
     "RankedResult",
     "FusionMethod",

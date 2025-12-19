@@ -18,6 +18,7 @@ from web_intel.navigation_agent.agent import (
 )
 from web_intel.navigation_agent.planner import (
     NavigationPlanner,
+    NavigationDecision,
     LinkCandidate,
     PageAssessment,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "NavigationResult",
     "StepOutcome",
     "NavigationPlanner",
+    "NavigationDecision",
     "LinkCandidate",
     "PageAssessment",
 ]

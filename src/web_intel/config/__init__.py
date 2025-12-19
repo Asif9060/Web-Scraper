@@ -13,6 +13,7 @@ from web_intel.config.settings import (
     LocalLLMSettings,
     APILLMSettings,
     EmbeddingSettings,
+    NavigationSettings,
     LoggingSettings,
 )
 from web_intel.config.loader import load_config, get_settings
@@ -25,6 +26,7 @@ __all__ = [
     "LocalLLMSettings",
     "APILLMSettings",
     "EmbeddingSettings",
+    "NavigationSettings",
     "LoggingSettings",
     "load_config",
     "get_settings",

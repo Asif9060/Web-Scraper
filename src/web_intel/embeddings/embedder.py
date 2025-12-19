@@ -18,6 +18,7 @@ from sentence_transformers import SentenceTransformer
 from web_intel.config import Settings
 from web_intel.core.exceptions import EmbeddingError
 from web_intel.utils.logging import get_logger
+from web_intel.utils.metrics import Metrics
 
 logger = get_logger(__name__)
 
@@ -253,6 +254,9 @@ class Embedder:
                 convert_to_numpy=True,
             )
 
+            # Record metrics
+            Metrics.get().increment("embeddings_generated")
+
             return EmbeddingResult(
                 embedding=embedding,
                 text_length=len(text),
@@ -300,6 +304,9 @@ class Embedder:
                 show_progress_bar=show,
                 convert_to_numpy=True,
             )
+
+            # Record metrics for batch
+            Metrics.get().increment("embeddings_generated", len(texts))
 
             return embeddings
 

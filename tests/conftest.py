@@ -17,7 +17,19 @@ import numpy as np
 import pytest
 
 from web_intel.config import Settings
-from web_intel.storage import Database
+from web_intel.storage import Database, reset_database
+
+
+@pytest.fixture(autouse=True)
+def reset_global_state():
+    """
+    Reset global database state before and after each test.
+
+    This ensures tests are isolated and don't share global state.
+    """
+    reset_database()
+    yield
+    reset_database()
 
 
 @pytest.fixture
@@ -46,9 +58,10 @@ def database(test_settings: Settings) -> Generator[Database, None, None]:
     """
     Provide an initialized test database.
 
+    Uses Database.create() for proper dependency injection.
     Creates a fresh database for each test and cleans up after.
     """
-    db = Database.initialize(test_settings)
+    db = Database.create(test_settings)
     yield db
     db.close()
 

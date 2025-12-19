@@ -7,6 +7,7 @@ Provides a memory-efficient implementation optimized for CPU-only
 
 import gc
 import threading
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -26,6 +27,7 @@ from transformers import (
 from web_intel.config import Settings
 from web_intel.core.exceptions import ModelLoadError, InferenceError
 from web_intel.utils.logging import get_logger
+from web_intel.utils.metrics import Metrics
 
 logger = get_logger(__name__)
 
@@ -390,6 +392,8 @@ class LocalLLM:
         """
         self.load()
         config = config or self.default_config
+        metrics = Metrics.get()
+        start_time = time.perf_counter()
 
         try:
             # Format messages using chat template
@@ -447,6 +451,11 @@ class LocalLLM:
             if completion_tokens >= config.max_new_tokens:
                 finish_reason = "length"
 
+            # Record metrics
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            metrics.increment("llm_calls")
+            metrics.observe("llm_latency_ms", duration_ms)
+
             return GenerationResult(
                 text=generated_text.strip(),
                 prompt_tokens=prompt_tokens,
@@ -458,6 +467,11 @@ class LocalLLM:
 
         except Exception as e:
             logger.error(f"Generation failed: {e}")
+            # Still record the failed call for observability
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            metrics.increment("llm_calls")
+            metrics.increment("llm_errors")
+            metrics.observe("llm_latency_ms", duration_ms)
             raise InferenceError(
                 "Generation failed",
                 details={"error": str(e), "model": self.model_name},

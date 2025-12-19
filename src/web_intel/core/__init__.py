@@ -26,6 +26,7 @@ from web_intel.core.exceptions import (
     APIConnectionError,
     APIRateLimitError,
     APIAuthenticationError,
+    LLMUnavailableError,
     EmbeddingError,
     QueryError,
     QueryInterpretationError,
@@ -61,6 +62,7 @@ __all__ = [
     "APIConnectionError",
     "APIRateLimitError",
     "APIAuthenticationError",
+    "LLMUnavailableError",
     # Embedding
     "EmbeddingError",
     # Query

@@ -5,8 +5,10 @@ Orchestrates retrieval, ranking, and LLM-based
 answer generation for user queries.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Callable
 
 from web_intel.config import Settings
@@ -15,9 +17,19 @@ from web_intel.vector_store import VectorStore, VectorSearchResult, SearchFilter
 from web_intel.query_parser import QueryParser, ParsedQuery, QueryExpander
 from web_intel.query_executor.ranker import ResultRanker, RankedResult, FusionMethod
 from web_intel.memory_store import MemoryStore, ContextManager, RetrievedContext
+from web_intel.core.exceptions import LLMUnavailableError
 from web_intel.utils.logging import get_logger
+from web_intel.utils.metrics import Metrics
 
 logger = get_logger(__name__)
+
+
+class AnswerStrategy(str, Enum):
+    """Strategy used for answer generation."""
+
+    LLM = "llm"  # Full LLM-generated answer
+    FALLBACK = "fallback"  # Best matching context (LLM unavailable)
+    NONE = "none"  # No answer generated
 
 
 @dataclass
@@ -85,6 +97,7 @@ class QueryResult:
     sources: list[AnswerSource] = field(default_factory=list)
     retrieval: RetrievalResult | None = None
     confidence: float = 0.0
+    strategy_used: AnswerStrategy = AnswerStrategy.NONE
     generated_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc))
     generation_time_ms: float = 0.0
@@ -94,6 +107,11 @@ class QueryResult:
     def has_answer(self) -> bool:
         """Check if an answer was generated."""
         return bool(self.answer and self.answer.strip())
+
+    @property
+    def used_fallback(self) -> bool:
+        """Check if fallback strategy was used."""
+        return self.strategy_used == AnswerStrategy.FALLBACK
 
     def format_with_citations(self) -> str:
         """Format answer with numbered citations."""
@@ -117,15 +135,18 @@ class QueryExecutor:
     3. Rank and fuse results
     4. Generate answer with LLM
 
+    All query methods are async to avoid blocking the event loop
+    during database and LLM operations.
+
     Example:
         >>> executor = QueryExecutor.from_settings(settings)
         >>>
-        >>> # Simple query
-        >>> result = executor.execute("What products do you offer?")
+        >>> # Simple query (async)
+        >>> result = await executor.execute("What products do you offer?")
         >>> print(result.answer)
         >>>
         >>> # With conversation context
-        >>> result = executor.execute(
+        >>> result = await executor.execute(
         ...     "Tell me more about the pricing",
         ...     session_id=session_id
         ... )
@@ -215,7 +236,7 @@ class QueryExecutor:
             answer_generator=answer_generator,
         )
 
-    def execute(
+    async def execute(
         self,
         query: str,
         session_id: str | None = None,
@@ -224,6 +245,9 @@ class QueryExecutor:
     ) -> QueryResult:
         """
         Execute a query and generate an answer.
+
+        This method is async to avoid blocking the event loop
+        during database operations.
 
         Args:
             query: User's question
@@ -238,33 +262,55 @@ class QueryExecutor:
 
         start_time = time.perf_counter()
 
-        # Parse query
+        # Parse query (sync, fast operation)
         parsed = self.parser.parse(query)
         logger.debug(
             f"Parsed query: type={parsed.query_type.value}, terms={parsed.key_terms}")
 
         # Handle follow-up questions
         if session_id and parsed.is_follow_up and self._context_manager:
-            return self._execute_follow_up(query, parsed, session_id, crawl_id)
+            return await self._execute_follow_up(query, parsed, session_id, crawl_id)
 
-        # Retrieve relevant content
-        retrieval = self._retrieve(query, parsed, crawl_id)
+        # Retrieve relevant content (async to avoid blocking)
+        retrieval = await self._retrieve(query, parsed, crawl_id)
 
         # Generate answer if requested and generator available
         answer = ""
         generation_time = 0.0
+        strategy_used = AnswerStrategy.NONE
 
-        if generate_answer and self.answer_generator and retrieval.results:
-            gen_start = time.perf_counter()
-            context = retrieval.get_context_text(max_results=5)
-            answer = self.answer_generator(query, context)
-            generation_time = (time.perf_counter() - gen_start) * 1000
+        if generate_answer and retrieval.results:
+            if self.answer_generator:
+                gen_start = time.perf_counter()
+                context = retrieval.get_context_text(max_results=5)
+
+                try:
+                    # Run answer generator in thread pool if it's blocking
+                    answer = await asyncio.to_thread(self.answer_generator, query, context)
+                    strategy_used = AnswerStrategy.LLM
+                    generation_time = (time.perf_counter() - gen_start) * 1000
+
+                except Exception as e:
+                    # LLM failed - use fallback strategy
+                    logger.warning(
+                        f"LLM answer generation failed: {e}. Using fallback strategy."
+                    )
+                    answer, strategy_used = self._generate_fallback_answer(
+                        retrieval)
+                    generation_time = (time.perf_counter() - gen_start) * 1000
+            else:
+                # No answer generator configured - use fallback
+                logger.debug("No answer generator configured, using fallback")
+                answer, strategy_used = self._generate_fallback_answer(
+                    retrieval)
 
         # Build sources
         sources = self._build_sources(retrieval.results[:5])
 
-        # Calculate confidence
+        # Calculate confidence (lower for fallback)
         confidence = self._calculate_confidence(retrieval, answer)
+        if strategy_used == AnswerStrategy.FALLBACK:
+            confidence = min(confidence, 0.4)
 
         # Store in memory if session provided
         if session_id and self._context_manager:
@@ -278,23 +324,82 @@ class QueryExecutor:
 
         total_time = (time.perf_counter() - start_time) * 1000
 
+        # Record query metrics
+        metrics = Metrics.get()
+        metrics.increment("queries_executed")
+        metrics.observe("query_latency_ms", total_time)
+
         return QueryResult(
             query=query,
             answer=answer,
             sources=sources,
             retrieval=retrieval,
             confidence=confidence,
+            strategy_used=strategy_used,
             generation_time_ms=generation_time,
             total_time_ms=total_time,
         )
 
-    def _retrieve(
+    def _generate_fallback_answer(
+        self,
+        retrieval: RetrievalResult,
+        max_length: int = 400,
+    ) -> tuple[str, AnswerStrategy]:
+        """
+        Generate fallback answer from best matching retrieved context.
+
+        Used when LLM is unavailable or fails.
+
+        Args:
+            retrieval: Retrieved results
+            max_length: Maximum answer length (300-500 chars recommended)
+
+        Returns:
+            Tuple of (fallback answer, strategy used)
+        """
+        if not retrieval.results:
+            return "", AnswerStrategy.NONE
+
+        # Get the best matching result
+        best_result = retrieval.results[0]
+        text = best_result.text.strip()
+
+        # Truncate safely at sentence boundary if possible
+        if len(text) > max_length:
+            # Try to find a sentence boundary
+            truncated = text[:max_length]
+            last_period = truncated.rfind(". ")
+            last_question = truncated.rfind("? ")
+            last_exclaim = truncated.rfind("! ")
+
+            best_boundary = max(last_period, last_question, last_exclaim)
+
+            if best_boundary > max_length * 0.5:
+                # Found a good boundary past halfway
+                text = truncated[:best_boundary + 1]
+            else:
+                # No good boundary, truncate at word boundary
+                last_space = truncated.rfind(" ")
+                if last_space > max_length * 0.7:
+                    text = truncated[:last_space] + "..."
+                else:
+                    text = truncated + "..."
+
+        # Add source attribution
+        if best_result.source_title:
+            answer = f"{text}\n\n[Source: {best_result.source_title}]"
+        else:
+            answer = text
+
+        return answer, AnswerStrategy.FALLBACK
+
+    async def _retrieve(
         self,
         query: str,
         parsed: ParsedQuery,
         crawl_id: int | None = None,
     ) -> RetrievalResult:
-        """Perform hybrid retrieval."""
+        """Perform hybrid retrieval asynchronously."""
         import time
 
         start_time = time.perf_counter()
@@ -302,19 +407,23 @@ class QueryExecutor:
         # Expand query for better retrieval
         expanded = self.expander.expand(parsed)
 
-        # Vector search
-        vector_results = self._vector_search(
-            queries=expanded.all_queries[:3],
-            crawl_id=crawl_id,
+        # Vector search and keyword search in parallel (both run in thread pool)
+        vector_task = asyncio.create_task(
+            self._vector_search(
+                queries=expanded.all_queries[:3], crawl_id=crawl_id)
+        )
+        keyword_task = asyncio.create_task(
+            self._keyword_search(
+                queries=self.expander.expand_for_keyword_search(parsed),
+                crawl_id=crawl_id,
+            )
         )
 
-        # Keyword search
-        keyword_results = self._keyword_search(
-            queries=self.expander.expand_for_keyword_search(parsed),
-            crawl_id=crawl_id,
+        vector_results, keyword_results = await asyncio.gather(
+            vector_task, keyword_task
         )
 
-        # Fuse results
+        # Fuse results (fast, in-memory operation)
         ranked = self.ranker.fuse(
             vector_results=vector_results,
             keyword_results=keyword_results,
@@ -337,97 +446,105 @@ class QueryExecutor:
             retrieval_time_ms=retrieval_time,
         )
 
-    def _vector_search(
+    async def _vector_search(
         self,
         queries: list[str],
         crawl_id: int | None = None,
     ) -> list[dict]:
-        """Perform vector similarity search."""
-        results = []
-        seen_chunks = set()
+        """Perform vector similarity search asynchronously."""
+        def _sync_vector_search() -> list[dict]:
+            """Synchronous search wrapped for thread pool."""
+            results = []
+            seen_chunks = set()
 
-        filters = SearchFilter(
-            crawl_id=crawl_id,
-            min_score=self.min_score,
-        )
+            filters = SearchFilter(
+                crawl_id=crawl_id,
+                min_score=self.min_score,
+            )
 
-        for query in queries:
-            try:
-                hits = self.vector_store.search_text(
-                    query,
-                    top_k=self.top_k,
-                    filters=filters,
-                )
+            for query in queries:
+                try:
+                    hits = self.vector_store.search_text(
+                        query,
+                        top_k=self.top_k,
+                        filters=filters,
+                    )
 
-                for hit in hits:
-                    if hit.chunk_id in seen_chunks:
-                        continue
-                    seen_chunks.add(hit.chunk_id)
+                    for hit in hits:
+                        if hit.chunk_id in seen_chunks:
+                            continue
+                        seen_chunks.add(hit.chunk_id)
 
-                    # Get page info
-                    page = self._page_repo.get_by_id(hit.page_id)
+                        # Get page info
+                        page = self._page_repo.get_by_id(hit.page_id)
 
-                    results.append({
-                        "chunk_id": hit.chunk_id,
-                        "page_id": hit.page_id,
-                        "text": hit.text,
-                        "score": hit.score,
-                        "source_url": page.url if page else "",
-                        "source_title": page.title if page else "",
-                    })
-
-            except Exception as e:
-                logger.warning(f"Vector search failed for query: {e}")
-
-        return results
-
-    def _keyword_search(
-        self,
-        queries: list[str],
-        crawl_id: int | None = None,
-    ) -> list[dict]:
-        """Perform full-text keyword search."""
-        results = []
-        seen_pages = set()
-
-        for query in queries:
-            try:
-                # Search pages using FTS
-                pages = self._page_repo.search_fts(query, limit=self.top_k)
-
-                for page in pages:
-                    if crawl_id and page.crawl_id != crawl_id:
-                        continue
-                    if page.id in seen_pages:
-                        continue
-                    seen_pages.add(page.id)
-
-                    # Get chunks for this page
-                    chunks = self._chunk_repo.get_by_page(page.id, limit=3)
-
-                    for chunk in chunks:
                         results.append({
-                            "chunk_id": chunk.id,
-                            "page_id": page.id,
-                            "text": chunk.text,
-                            "score": 1.0,  # FTS doesn't provide scores easily
-                            "source_url": page.url,
-                            "source_title": page.title,
+                            "chunk_id": hit.chunk_id,
+                            "page_id": hit.page_id,
+                            "text": hit.text,
+                            "score": hit.score,
+                            "source_url": page.url if page else "",
+                            "source_title": page.title if page else "",
                         })
 
-            except Exception as e:
-                logger.warning(f"Keyword search failed for query: {e}")
+                except Exception as e:
+                    logger.warning(f"Vector search failed for query: {e}")
 
-        return results
+            return results
 
-    def _execute_follow_up(
+        return await asyncio.to_thread(_sync_vector_search)
+
+    async def _keyword_search(
+        self,
+        queries: list[str],
+        crawl_id: int | None = None,
+    ) -> list[dict]:
+        """Perform full-text keyword search asynchronously."""
+        def _sync_keyword_search() -> list[dict]:
+            """Synchronous search wrapped for thread pool."""
+            results = []
+            seen_pages = set()
+
+            for query in queries:
+                try:
+                    # Search pages using FTS
+                    pages = self._page_repo.search_fts(query, limit=self.top_k)
+
+                    for page in pages:
+                        if crawl_id and page.crawl_id != crawl_id:
+                            continue
+                        if page.id in seen_pages:
+                            continue
+                        seen_pages.add(page.id)
+
+                        # Get chunks for this page
+                        chunks = self._chunk_repo.get_by_page(page.id, limit=3)
+
+                        for chunk in chunks:
+                            results.append({
+                                "chunk_id": chunk.id,
+                                "page_id": page.id,
+                                "text": chunk.text,
+                                "score": 1.0,  # FTS doesn't provide scores easily
+                                "source_url": page.url,
+                                "source_title": page.title,
+                            })
+
+                except Exception as e:
+                    logger.warning(f"Keyword search failed for query: {e}")
+
+            return results
+
+        return await asyncio.to_thread(_sync_keyword_search)
+
+    async def _execute_follow_up(
         self,
         query: str,
         parsed: ParsedQuery,
         session_id: str,
         crawl_id: int | None = None,
     ) -> QueryResult:
-        """Execute a follow-up query with conversation context."""
+        """Execute a follow-up query with conversation context asynchronously."""
         import time
 
         start_time = time.perf_counter()
@@ -437,28 +554,51 @@ class QueryExecutor:
             session_id, max_turns=3
         )
 
-        # Retrieve with expanded context
-        retrieval = self._retrieve(query, parsed, crawl_id)
+        # Retrieve with expanded context (async)
+        retrieval = await self._retrieve(query, parsed, crawl_id)
 
         # Generate answer with conversation context
         answer = ""
         generation_time = 0.0
+        strategy_used = AnswerStrategy.NONE
 
-        if self.answer_generator and retrieval.results:
-            gen_start = time.perf_counter()
+        if retrieval.results:
+            if self.answer_generator:
+                gen_start = time.perf_counter()
 
-            # Combine conversation history with new context
-            new_context = retrieval.get_context_text(max_results=3)
-            full_context = (
-                f"Previous conversation:\n{conversation_context}\n\n"
-                f"New context:\n{new_context}"
-            )
+                # Combine conversation history with new context
+                new_context = retrieval.get_context_text(max_results=3)
+                full_context = (
+                    f"Previous conversation:\n{conversation_context}\n\n"
+                    f"New context:\n{new_context}"
+                )
 
-            answer = self.answer_generator(query, full_context)
-            generation_time = (time.perf_counter() - gen_start) * 1000
+                try:
+                    # Run answer generator in thread pool
+                    answer = await asyncio.to_thread(self.answer_generator, query, full_context)
+                    strategy_used = AnswerStrategy.LLM
+                    generation_time = (time.perf_counter() - gen_start) * 1000
+
+                except Exception as e:
+                    # LLM failed - use fallback strategy
+                    logger.warning(
+                        f"LLM answer generation failed in follow-up: {e}. Using fallback."
+                    )
+                    answer, strategy_used = self._generate_fallback_answer(
+                        retrieval)
+                    generation_time = (time.perf_counter() - gen_start) * 1000
+            else:
+                # No answer generator - use fallback
+                answer, strategy_used = self._generate_fallback_answer(
+                    retrieval)
 
         # Build sources
         sources = self._build_sources(retrieval.results[:5])
+
+        # Calculate confidence (lower for fallback)
+        confidence = self._calculate_confidence(retrieval, answer)
+        if strategy_used == AnswerStrategy.FALLBACK:
+            confidence = min(confidence, 0.4)
 
         # Store in memory
         self._context_manager.add_query_to_memory(session_id, query)
@@ -476,7 +616,8 @@ class QueryExecutor:
             answer=answer,
             sources=sources,
             retrieval=retrieval,
-            confidence=self._calculate_confidence(retrieval, answer),
+            confidence=confidence,
+            strategy_used=strategy_used,
             generation_time_ms=generation_time,
             total_time_ms=total_time,
         )
@@ -527,7 +668,7 @@ class QueryExecutor:
         confidence = top_score + source_boost + answer_boost
         return min(1.0, confidence)
 
-    def retrieve_only(
+    async def retrieve_only(
         self,
         query: str,
         crawl_id: int | None = None,
@@ -545,15 +686,15 @@ class QueryExecutor:
             RetrievalResult with ranked chunks
         """
         parsed = self.parser.parse(query)
-        return self._retrieve(query, parsed, crawl_id)
+        return await self._retrieve(query, parsed, crawl_id)
 
-    def search_pages(
+    async def search_pages(
         self,
         query: str,
         limit: int = 10,
     ) -> list[dict]:
         """
-        Search for relevant pages.
+        Search for relevant pages asynchronously.
 
         Returns page-level results instead of chunks.
 
@@ -564,23 +705,25 @@ class QueryExecutor:
         Returns:
             List of page info dictionaries
         """
-        # Use FTS for page search
-        pages = self._page_repo.search_fts(query, limit=limit)
+        def _sync_search() -> list[dict]:
+            # Use FTS for page search
+            pages = self._page_repo.search_fts(query, limit=limit)
+            return [
+                {
+                    "id": page.id,
+                    "url": page.url,
+                    "title": page.title,
+                    "summary": page.summary,
+                    "word_count": page.word_count,
+                }
+                for page in pages
+            ]
 
-        return [
-            {
-                "id": page.id,
-                "url": page.url,
-                "title": page.title,
-                "summary": page.summary,
-                "word_count": page.word_count,
-            }
-            for page in pages
-        ]
+        return await asyncio.to_thread(_sync_search)
 
-    def get_page_context(self, page_id: int) -> str:
+    async def get_page_context(self, page_id: int) -> str:
         """
-        Get full context for a specific page.
+        Get full context for a specific page asynchronously.
 
         Args:
             page_id: Page ID
@@ -588,8 +731,11 @@ class QueryExecutor:
         Returns:
             Combined text from all chunks
         """
-        chunks = self._chunk_repo.get_by_page(page_id)
-        return "\n\n".join(chunk.text for chunk in chunks)
+        def _sync_get_context() -> str:
+            chunks = self._chunk_repo.get_by_page(page_id)
+            return "\n\n".join(chunk.text for chunk in chunks)
+
+        return await asyncio.to_thread(_sync_get_context)
 
     def create_session(self) -> str:
         """

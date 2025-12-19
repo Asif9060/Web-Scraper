@@ -197,8 +197,8 @@ async def _crawl_async(
         border_style="blue",
     ))
 
-    # Initialize database
-    db = Database.initialize(settings)
+    # Create database instance (explicit DI)
+    db = Database.create(settings)
 
     # Create repositories
     crawl_repo = CrawlRepository(db)
@@ -402,8 +402,8 @@ def _query_sync(
     # Load configuration
     settings = load_config(config_file)
 
-    # Initialize components
-    db = Database.initialize(settings)
+    # Create components with explicit dependency injection
+    db = Database.create(settings)
     vector_store = VectorStore.from_settings(settings, db)
     memory_store = MemoryStore.from_settings(settings, db)
 
@@ -440,10 +440,10 @@ def _single_query(
     console.print(f"\n[bold]Question:[/bold] {question}\n")
 
     with console.status("[cyan]Thinking..."):
-        result = executor.execute(
+        result = asyncio.run(executor.execute(
             query=question,
             crawl_id=crawl_id,
-        )
+        ))
 
     # Display answer
     console.print(Panel(
@@ -527,11 +527,11 @@ def _interactive_query(
 
             # Execute query
             with console.status("[cyan]Thinking..."):
-                result = executor.execute(
+                result = asyncio.run(executor.execute(
                     query=question,
                     session_id=session_id,
                     crawl_id=crawl_id,
-                )
+                ))
 
             # Display answer
             console.print(
@@ -591,7 +591,7 @@ def _show_status(config_file: Optional[Path]) -> None:
     # Database status
     console.print("\n[bold]Database:[/bold]")
     if db_exists:
-        db = Database.initialize(settings)
+        db = Database.create(settings)
 
         # Get statistics
         crawl_repo = CrawlRepository(db)
@@ -775,7 +775,7 @@ def search(
     from web_intel.vector_store import VectorStore
 
     settings = load_config(config_file)
-    db = Database.initialize(settings)
+    db = Database.create(settings)
     vector_store = VectorStore.from_settings(settings, db)
 
     # Load vector index

@@ -2,11 +2,13 @@
 SQLite database connection management.
 
 Provides thread-safe database access with WAL mode
-and connection pooling.
+and connection pooling. Supports both dependency injection
+and a global singleton pattern (deprecated).
 """
 
 import sqlite3
 import threading
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -21,7 +23,7 @@ logger = get_logger(__name__)
 # Thread-local storage for connections
 _local = threading.local()
 
-# Global database instance
+# Global database instance (deprecated - prefer dependency injection)
 _database: "Database | None" = None
 _database_lock = threading.Lock()
 
@@ -29,6 +31,10 @@ _database_lock = threading.Lock()
 def get_database() -> "Database":
     """
     Get the global database instance.
+
+    .. deprecated::
+        Use dependency injection instead. Pass Database instances
+        explicitly to components that need them.
 
     Returns:
         Database singleton instance
@@ -39,8 +45,27 @@ def get_database() -> "Database":
     global _database
     if _database is None:
         raise DatabaseError(
-            "Database not initialized. Call Database.initialize() first.")
+            "Database not initialized. Call Database.initialize() first "
+            "or use Database.create() with dependency injection.")
     return _database
+
+
+def reset_database() -> None:
+    """
+    Reset the global database instance.
+
+    Primarily used for testing to ensure clean state between tests.
+    Closes the existing database before resetting.
+    """
+    global _database
+    with _database_lock:
+        if _database is not None:
+            try:
+                _database.close()
+            except Exception:
+                pass
+            _database = None
+    logger.debug("Global database instance reset")
 
 
 class Database:
@@ -52,14 +77,14 @@ class Database:
     - Connection per thread
     - Automatic schema initialization
 
-    Example:
-        >>> db = Database.initialize(settings)
-        >>> with db.connection() as conn:
-        ...     cursor = conn.execute("SELECT * FROM pages")
-        ...     rows = cursor.fetchall()
+    Preferred Usage (Dependency Injection):
+        >>> db = Database.create(settings)  # Creates new instance
+        >>> vector_store = VectorStore(database=db, ...)
+        >>> query_executor = QueryExecutor(database=db, ...)
 
-        >>> # Or use get_database() anywhere
-        >>> db = get_database()
+    Legacy Usage (Global Singleton - deprecated):
+        >>> db = Database.initialize(settings)  # Sets global
+        >>> db = get_database()  # Gets global
     """
 
     def __init__(
@@ -90,15 +115,43 @@ class Database:
         logger.info(f"Database manager created (path={database_path})")
 
     @classmethod
-    def initialize(cls, settings: Settings) -> "Database":
+    def create(cls, settings: Settings) -> "Database":
         """
-        Initialize and return global database instance.
+        Create a new database instance (preferred method).
+
+        This method creates a fresh database instance without using
+        any global state, making it suitable for dependency injection.
 
         Args:
             settings: Application settings
 
         Returns:
-            Database instance
+            New Database instance
+        """
+        storage = settings.storage
+        db = cls(
+            database_path=storage.database_path,
+            wal_mode=storage.wal_mode,
+            cache_size_mb=storage.cache_size_mb,
+            vector_dimensions=storage.vector_dimensions,
+        )
+        db._setup()
+        return db
+
+    @classmethod
+    def initialize(cls, settings: Settings) -> "Database":
+        """
+        Initialize and return global database instance.
+
+        .. deprecated::
+            Use Database.create() with dependency injection instead.
+            This method uses global state which complicates testing.
+
+        Args:
+            settings: Application settings
+
+        Returns:
+            Database instance (global singleton)
         """
         global _database
 
@@ -118,8 +171,19 @@ class Database:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "Database":
-        """Create database from settings (alias for initialize)."""
-        return cls.initialize(settings)
+        """
+        Create database from settings.
+
+        Creates a new instance without using global state.
+        Preferred over initialize() for dependency injection.
+
+        Args:
+            settings: Application settings
+
+        Returns:
+            New Database instance
+        """
+        return cls.create(settings)
 
     def _setup(self) -> None:
         """Setup database: create directory, initialize schema."""

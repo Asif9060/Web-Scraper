@@ -450,6 +450,34 @@ class APIAuthenticationError(APILLMError):
     pass
 
 
+class LLMUnavailableError(LLMError):
+    """
+    Error indicating LLM is unavailable for answer generation.
+
+    Raised when:
+    - Model fails to load (OOM, missing files)
+    - Inference raises an exception
+    - API quota exceeded
+    - Any LLM operation cannot complete
+
+    This error triggers fallback behavior in the query pipeline
+    rather than crashing the entire operation.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        cause: Exception | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        details = details or {}
+        if cause:
+            details["cause"] = str(cause)
+            details["cause_type"] = type(cause).__name__
+        super().__init__(message, details)
+        self.cause = cause
+
+
 # =============================================================================
 # Embedding Errors
 # =============================================================================

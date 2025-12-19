@@ -389,12 +389,14 @@ class NavigationAgent:
                     # Filter unvisited
                     new_links = [l for l in links if l.url not in visited_urls]
 
-                    # Prioritize
-                    prioritized = self.planner.prioritize_links(
+                    # Prioritize (returns tuple of links and decision)
+                    prioritized, decision = self.planner.prioritize_links(
                         goal=goal.objective,
                         current_page=f"{title} ({current_url})",
                         links=new_links,
                     )
+
+                    logger.debug(f"Link prioritization: {decision.rationale}")
 
                     # Add to plan
                     for link in prioritized:
