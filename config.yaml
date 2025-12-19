@@ -1,0 +1,139 @@
+# Web Intelligence System Configuration
+# =====================================
+#
+# This file contains the default configuration values.
+# Override any setting by modifying this file or using environment variables.
+#
+# Environment variable format: WEB_INTEL__{SECTION}__{KEY}
+# Example: WEB_INTEL__CRAWLER__MAX_PAGES=1000
+#
+# All settings have sensible defaults optimized for CPU-only, 8GB RAM systems.
+
+browser:
+   # Run browser without visible window
+   headless: true
+   # Default timeout for page operations (ms)
+   timeout_ms: 30000
+   # Timeout for page navigation (ms)
+   navigation_timeout_ms: 60000
+   # Custom user agent (null uses browser default)
+   user_agent: null
+   # Browser viewport dimensions
+   viewport_width: 1280
+   viewport_height: 720
+   # Whether to ignore HTTPS certificate errors
+   ignore_https_errors: false
+   # Browser engine: chromium, firefox, or webkit
+   browser_type: chromium
+
+crawler:
+   # Maximum pages to crawl per website (MVP limit: 500)
+   max_pages: 500
+   # Delay between page requests (seconds)
+   delay_seconds: 1.0
+   # Concurrent page processing (keep low for stability)
+   concurrent_pages: 1
+   # Maximum crawl depth from starting URL
+   max_depth: 10
+   # Whether to respect robots.txt
+   respect_robots_txt: true
+   # Whether to follow external domain links
+   follow_external_links: false
+   # URL patterns to include (empty = all)
+   url_patterns_include: []
+   # URL patterns to exclude
+   url_patterns_exclude:
+      - '.*\.(pdf|zip|tar|gz|exe|dmg|pkg|deb|rpm)$'
+      - '.*\.(jpg|jpeg|png|gif|svg|ico|webp|bmp)$'
+      - '.*\.(mp3|mp4|avi|mov|wmv|flv|webm)$'
+      - '.*\?.*utm_'
+      - ".*/login.*"
+      - ".*/logout.*"
+      - ".*/signin.*"
+      - ".*/signout.*"
+   # Retry configuration
+   max_retries: 3
+   retry_delay_seconds: 5.0
+
+storage:
+   # Path to SQLite database
+   database_path: data/knowledge.db
+   # Vector embedding dimensions (must match embedding model)
+   vector_dimensions: 384
+   # Enable WAL mode for concurrent access
+   wal_mode: true
+   # SQLite cache size (MB)
+   cache_size_mb: 64
+
+local_llm:
+   # Enable local LLM for extraction
+   enabled: true
+   # HuggingFace model identifier (optimized for 8GB RAM)
+   model_name: Qwen/Qwen2.5-1.5B-Instruct
+   # Device: cpu, cuda, or mps
+   device: cpu
+   # PyTorch dtype (use float32 for CPU stability)
+   torch_dtype: float32
+   # Maximum tokens to generate
+   max_new_tokens: 512
+   # Sampling temperature (low = deterministic)
+   temperature: 0.1
+   # Nucleus sampling probability
+   top_p: 0.9
+   # Use greedy decoding for consistency
+   do_sample: false
+   # Reduce memory during model loading
+   low_cpu_mem_usage: true
+   # Trust remote code (set true only for trusted models)
+   trust_remote_code: false
+   # Model cache directory (null = HuggingFace default)
+   cache_dir: null
+
+api_llm:
+   # Enable API LLM for query interpretation and answers
+   enabled: true
+   # API provider
+   provider: anthropic
+   # Model identifier
+   model_name: claude-sonnet-4-20250514
+   # Environment variable containing API key
+   api_key_env_var: ANTHROPIC_API_KEY
+   # Maximum response tokens
+   max_tokens: 1024
+   # Sampling temperature
+   temperature: 0.2
+   # Request timeout (seconds)
+   timeout_seconds: 60
+   # Retry configuration
+   max_retries: 3
+   retry_delay_seconds: 1.0
+
+embedding:
+   # Sentence transformer model (~80MB, 384 dimensions)
+   model_name: sentence-transformers/all-MiniLM-L6-v2
+   # Device for embeddings
+   device: cpu
+   # Batch size for embedding generation
+   batch_size: 32
+   # L2-normalize embeddings for cosine similarity
+   normalize_embeddings: true
+   # Show progress during embedding
+   show_progress_bar: false
+   # Model cache directory
+   cache_dir: null
+
+logging:
+   # Minimum log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+   level: INFO
+   # Log message format
+   format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+   # Timestamp format
+   date_format: "%Y-%m-%d %H:%M:%S"
+   # Log file path (null = console only)
+   file_path: null
+   # Max log file size before rotation (MB)
+   max_file_size_mb: 10
+   # Number of backup log files
+   backup_count: 3
+   # Output to console
+   log_to_console: true
